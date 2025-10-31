@@ -1,0 +1,17 @@
+
+[FaceNet]
+  Rank-1 accuracy : 0.9202
+  CMC@1 / @5 / @10: 0.9202 / 0.9693 / 0.9787
+  Mean rank       : 2.88
+  Median rank     : 0.00
+
+[ArcFace]
+  Rank-1 accuracy : 0.9837
+  CMC@1 / @5 / @10: 0.9837 / 0.9845 / 0.9845
+  Mean rank       : 6.76
+  Median rank     : 0.00
+
+=== Comparison ===
+  Higher Rank-1: ArcFace
+  FaceNet  Rank-1: 0.9202 | CMC@5: 0.9693
+  ArcFace  Rank-1: 0.9837 | CMC@5: 0.9845
