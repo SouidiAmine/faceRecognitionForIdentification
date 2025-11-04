@@ -27,3 +27,7 @@ ENV/
 
 # Data folder
 data/
+
+# Specific files
+Demo_ass2.mp4
+Face_Recognition_for_Identification.pdf

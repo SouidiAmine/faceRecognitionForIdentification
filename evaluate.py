@@ -1,6 +1,5 @@
-# evaluate.py — Complete version (English, with initials for confusion matrix)
+# evaluate.py — Final version (top-30 confusion, numeric labels, fixed colorbar 0–6)
 import os
-import re
 import argparse
 import numpy as np
 import matplotlib.pyplot as plt
@@ -9,38 +8,25 @@ from collections import OrderedDict
 
 
 # ================== Helper Functions ==================
-def to_initials(label: str) -> str:
-    """
-    Convert a label like 'First_Last' or 'John_Smith' to initials 'S.J'.
-    Works well with LFW format (Firstname Lastname).
-    """
-    parts = re.split(r"[_\s\-]+", label.strip())
-    parts = [p for p in parts if p]
-    if not parts:
-        return label[:1].upper()
-    first = parts[0]
-    last = parts[-1]
-    f0 = first[0].upper() if first else ""
-    l0 = last[0].upper() if last else ""
-    return f"{l0}.{f0}"
-
-
 def cosine_sim(a, b):
+    """Compute cosine similarity between two feature matrices."""
     a = a / (np.linalg.norm(a, axis=1, keepdims=True) + 1e-12)
     b = b / (np.linalg.norm(b, axis=1, keepdims=True) + 1e-12)
     return a @ b.T
 
 
 def rank1_predictions(probe_feats, gallery_feats, gallery_labels):
-    sims = cosine_sim(probe_feats, gallery_feats)      # [P,G]
+    """Return predicted labels using highest cosine similarity."""
+    sims = cosine_sim(probe_feats, gallery_feats)
     idx = np.argmax(sims, axis=1)
     return np.array(gallery_labels)[idx], sims.max(axis=1), sims
 
 
 def cmc_curve(probe_feats, probe_labels, gallery_feats, gallery_labels, max_rank=20):
-    sims = cosine_sim(probe_feats, gallery_feats)      # [P,G]
+    """Compute CMC (Cumulative Match Characteristic) curve."""
+    sims = cosine_sim(probe_feats, gallery_feats)
     order = np.argsort(-sims, axis=1)
-    ranked_labels = np.array(gallery_labels)[order]    # [P,G]
+    ranked_labels = np.array(gallery_labels)[order]
     ranks = np.full(len(probe_labels), 10**9, dtype=int)
     for i, y in enumerate(probe_labels):
         pos = np.where(ranked_labels[i] == y)[0]
@@ -50,13 +36,21 @@ def cmc_curve(probe_feats, probe_labels, gallery_feats, gallery_labels, max_rank
     return np.array(cmc), ranks
 
 
-def load_split(prefix):
-    g = np.load(f"outputs/{prefix}_gallery.npz", allow_pickle=True)
-    p = np.load(f"outputs/{prefix}_probe.npz", allow_pickle=True)
+def load_split(prefix, base_dir):
+    """Load gallery and probe features + labels from specified folder."""
+    g_path = os.path.join(base_dir, f"{prefix}_gallery.npz")
+    p_path = os.path.join(base_dir, f"{prefix}_probe.npz")
+
+    if not os.path.exists(g_path) or not os.path.exists(p_path):
+        raise FileNotFoundError(f"[!] Missing files: {g_path} or {p_path}")
+
+    g = np.load(g_path, allow_pickle=True)
+    p = np.load(p_path, allow_pickle=True)
     return g["feats"], g["labels"], p["feats"], p["labels"]
 
 
 def save_cmc(cmc_dict, out_png, out_csv=None):
+    """Save CMC curves and optionally export as CSV."""
     plt.figure(figsize=(7, 5))
     for name, cmc in cmc_dict.items():
         ranks = np.arange(1, len(cmc) + 1)
@@ -80,32 +74,56 @@ def save_cmc(cmc_dict, out_png, out_csv=None):
             f.write("\n".join(rows))
 
 
-def save_confusion(y_true, y_pred, labels, title, out_png,
-                   normalize=True, display_labels=None):
-    cm = confusion_matrix(y_true, y_pred, labels=labels,
-                          normalize="true" if normalize else None)
-    tick_text = display_labels if display_labels is not None else labels
-    fig_w = max(6, len(labels) * 0.4)
-    fig_h = max(5, len(labels) * 0.4)
-    fig, ax = plt.subplots(figsize=(fig_w, fig_h))
-    im = ax.imshow(cm, interpolation="nearest", cmap="Blues",
-                   vmin=0.0 if normalize else None,
-                   vmax=1.0 if normalize else None)
+def save_confusion_visual(cm, labels, title, out_png, top_k=30, normalize=True):
+    """
+    Visualize only the top-K most confused classes with fixed colorbar range
+    and display numeric values inside each cell.
+    """
+    errors = np.sum(cm, axis=1) - np.diag(cm)
+    top_idx = np.argsort(-errors)[:min(top_k, len(labels))]
+    cm_subset = cm[np.ix_(top_idx, top_idx)]
+    n_labels = len(top_idx)
+
+    # === Normalize or fix range ===
+    if normalize:
+        row_sums = cm_subset.sum(axis=1, keepdims=True) + 1e-12
+        cm_subset = cm_subset / row_sums
+        vmin_value, vmax_value = 0.0, 1.0
+    else:
+        vmin_value, vmax_value = 0.0, 6.0  # fixed range
+
+    fig, ax = plt.subplots(figsize=(max(6, n_labels * 0.4), max(5, n_labels * 0.4)))
+    im = ax.imshow(cm_subset, interpolation="nearest", cmap="Blues",
+                   vmin=vmin_value, vmax=vmax_value)
+
+    # Colorbar
     ax.figure.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-    ax.set_title(title)
-    ax.set_xlabel("Predicted")
-    ax.set_ylabel("True")
-    ax.set_xticks(np.arange(len(labels)))
-    ax.set_yticks(np.arange(len(labels)))
-    ax.set_xticklabels(tick_text, rotation=90)
-    ax.set_yticklabels(tick_text)
-    ax.grid(False)
+    ax.set_title(f"{title} (Top {n_labels} confused classes)")
+    ax.set_xlabel("Predicted index")
+    ax.set_ylabel("True index")
+    ax.set_xticks(np.arange(n_labels))
+    ax.set_yticks(np.arange(n_labels))
+    ax.set_xticklabels(np.arange(n_labels))
+    ax.set_yticklabels(np.arange(n_labels))
+
+    # === Add numeric values ===
+    fmt = ".2f" if normalize else "d"
+    thresh = (vmax_value + vmin_value) / 2.0
+    for i in range(n_labels):
+        for j in range(n_labels):
+            val = format(cm_subset[i, j], fmt)
+            ax.text(j, i, val,
+                    ha="center", va="center",
+                    color="white" if cm_subset[i, j] > thresh / 2 else "black",
+                    fontsize=8)
+
     plt.tight_layout()
-    plt.savefig(out_png, dpi=200)
+    plt.savefig(out_png, dpi=300)
     plt.close()
 
 
 def print_summary(name, acc, cmc, ranks, file_handle=None):
+    """Print and optionally save performance summary."""
     cmc1 = float(cmc[0]) if len(cmc) >= 1 else np.nan
     cmc5 = float(cmc[4]) if len(cmc) >= 5 else np.nan
     cmc10 = float(cmc[9]) if len(cmc) >= 10 else np.nan
@@ -125,42 +143,42 @@ def print_summary(name, acc, cmc, ranks, file_handle=None):
 
 # ================== MAIN SCRIPT ==================
 if __name__ == "__main__":
-    ap = argparse.ArgumentParser(description="Evaluate face identification models (print and save results).")
+    ap = argparse.ArgumentParser(description="Evaluate face identification models (top-30 confusion with color scale 0–6).")
+    ap.add_argument("--data-dir", type=str, default="outputs",
+                    help="Folder containing .npz files (default: outputs/)")
     ap.add_argument("--out-dir", type=str, default="evaluation",
                     help="Folder where results and plots will be saved.")
-    ap.add_argument("--max-rank", type=int, default=20, help="Maximum rank for CMC curves.")
-    ap.add_argument("--subset", type=int, default=20,
-                    help="Number of identities to show in confusion matrices (to keep them readable).")
-    ap.add_argument("--normalize-confusion", action="store_true",
-                    help="Normalize confusion matrices by true class (recommended).")
+    ap.add_argument("--max-rank", type=int, default=20)
+    ap.add_argument("--normalize-confusion", action="store_true")
+    ap.add_argument("--top-k", type=int, default=30,
+                    help="Number of most confused classes to display in the matrix.")
     args = ap.parse_args()
 
     os.makedirs(args.out_dir, exist_ok=True)
 
     # ---------- FaceNet ----------
-    gF, gL, pF, pL = load_split("facenet")
-    yhat_fn, scores_fn, sims_fn = rank1_predictions(pF, gF, gL)
+    gF, gL, pF, pL = load_split("facenet", args.data_dir)
+    yhat_fn, _, _ = rank1_predictions(pF, gF, gL)
     acc_fn = (yhat_fn == pL).mean()
     cmc_fn, ranks_fn = cmc_curve(pF, pL, gF, gL, max_rank=args.max_rank)
 
     # ---------- ArcFace ----------
-    gF2, gL2, pF2, pL2 = load_split("arcface")
-    yhat_af, scores_af, sims_af = rank1_predictions(pF2, gF2, gL2)
+    gF2, gL2, pF2, pL2 = load_split("arcface", args.data_dir)
+    yhat_af, _, _ = rank1_predictions(pF2, gF2, gL2)
     acc_af = (yhat_af == pL2).mean()
     cmc_af, ranks_af = cmc_curve(pF2, pL2, gF2, gL2, max_rank=args.max_rank)
 
-    # ---------- Save text summary ----------
+    # ---------- Save summary ----------
     summary_path = os.path.join(args.out_dir, "summary.txt")
     with open(summary_path, "w", encoding="utf-8") as f:
         print_summary("FaceNet", acc_fn, cmc_fn, ranks_fn, file_handle=f)
         print_summary("ArcFace", acc_af, cmc_af, ranks_af, file_handle=f)
-
         better = "FaceNet" if acc_fn > acc_af else ("ArcFace" if acc_af > acc_fn else "Tie")
         comp = (
             "\n=== Comparison ===\n"
             f"  Higher Rank-1: {better}\n"
-            f"  FaceNet  Rank-1: {acc_fn:.4f} | CMC@5: {cmc_fn[4] if len(cmc_fn)>=5 else np.nan:.4f}\n"
-            f"  ArcFace  Rank-1: {acc_af:.4f} | CMC@5: {cmc_af[4] if len(cmc_af)>=5 else np.nan:.4f}\n"
+            f"  FaceNet  Rank-1: {acc_fn:.4f}\n"
+            f"  ArcFace  Rank-1: {acc_af:.4f}\n"
         )
         print(comp, end="")
         f.write(comp)
@@ -173,45 +191,26 @@ if __name__ == "__main__":
     )
 
     # ---------- Confusion Matrices ----------
-    N = args.subset
-
-    # FaceNet
     uniq_fn = sorted(list(set(pL.tolist())))
-    subset_fn = uniq_fn[:N] if N > 0 else uniq_fn
-    mask_fn = np.isin(pL, subset_fn)
-    subset_fn_initials = [to_initials(x) for x in subset_fn]
-    save_confusion(
-        pL[mask_fn], yhat_fn[mask_fn], subset_fn,
-        title="Confusion Matrix — FaceNet (subset)",
-        out_png=os.path.join(args.out_dir, "confusion_facenet.png"),
-        normalize=args.normalize_confusion,
-        display_labels=subset_fn_initials
+    cm_fn = confusion_matrix(pL, yhat_fn, labels=uniq_fn)
+    np.save(os.path.join(args.out_dir, "confusion_facenet_global.npy"), cm_fn)
+    save_confusion_visual(
+        cm_fn, uniq_fn,
+        title="Confusion Matrix — FaceNet",
+        out_png=os.path.join(args.out_dir, "confusion_facenet_top30.png"),
+        top_k=args.top_k,
+        normalize=args.normalize_confusion
     )
 
-    # ArcFace
     uniq_af = sorted(list(set(pL2.tolist())))
-    subset_af = uniq_af[:N] if N > 0 else uniq_af
-    mask_af = np.isin(pL2, subset_af)
-    subset_af_initials = [to_initials(x) for x in subset_af]
-    save_confusion(
-        pL2[mask_af], yhat_af[mask_af], subset_af,
-        title="Confusion Matrix — ArcFace (subset)",
-        out_png=os.path.join(args.out_dir, "confusion_arcface.png"),
-        normalize=args.normalize_confusion,
-        display_labels=subset_af_initials
+    cm_af = confusion_matrix(pL2, yhat_af, labels=uniq_af)
+    np.save(os.path.join(args.out_dir, "confusion_arcface_global.npy"), cm_af)
+    save_confusion_visual(
+        cm_af, uniq_af,
+        title="Confusion Matrix — ArcFace",
+        out_png=os.path.join(args.out_dir, "confusion_arcface_top30.png"),
+        top_k=args.top_k,
+        normalize=args.normalize_confusion
     )
 
-    # ---------- Save label-initial mappings ----------
-    with open(os.path.join(args.out_dir, "labels_initials_facenet.csv"), "w", encoding="utf-8") as f:
-        f.write("original,initials\n")
-        for o, i in zip(subset_fn, subset_fn_initials):
-            f.write(f"{o},{i}\n")
-
-    with open(os.path.join(args.out_dir, "labels_initials_arcface.csv"), "w", encoding="utf-8") as f:
-        f.write("original,initials\n")
-        for o, i in zip(subset_af, subset_af_initials):
-            f.write(f"{o},{i}\n")
-
-    # ---------- Display summary ----------
-    print(open(summary_path, "r", encoding="utf-8").read())
-    print(f"All results saved in: {os.path.abspath(args.out_dir)}")
+    print(f"\n[✔] All results saved in: {os.path.abspath(args.out_dir)}")
